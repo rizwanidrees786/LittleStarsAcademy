@@ -23,6 +23,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.google.mediapipe.tasks.genai.llminference.LlmInference
+import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -129,9 +130,6 @@ class LlmEngine(private val ctx: Context) {
             val opts = LlmInference.LlmInferenceOptions.builder()
                 .setModelPath(file.absolutePath)
                 .setMaxTokens(1024)
-                .setTopK(40)
-                .setTemperature(0.7f)
-                .setRandomSeed(7)
                 .build()
             llm = LlmInference.createFromOptions(ctx, opts)
             loadedName = file.name
@@ -144,7 +142,20 @@ class LlmEngine(private val ctx: Context) {
     }
 
     suspend fun generate(prompt: String): String? = withContext(Dispatchers.IO) {
-        try { llm?.generateResponse(prompt) } catch (e: Throwable) { null }
+        val engine = llm ?: return@withContext null
+        try {
+            val sessionOpts = LlmInferenceSession.LlmInferenceSessionOptions.builder()
+                .setTopK(40)
+                .setTemperature(0.7f)
+                .setRandomSeed(7)
+                .build()
+            LlmInferenceSession.createFromOptions(engine, sessionOpts).use { session ->
+                session.addQueryChunk(prompt)
+                session.generateResponse()
+            }
+        } catch (e: Throwable) {
+            null
+        }
     }
 
     fun unload() { try { llm?.close() } catch (_: Throwable) { }; llm = null; loadedName = null }
@@ -401,41 +412,78 @@ fun ModelsScreen(s: AppState, onBack: () -> Unit) {
                 GlassCard(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                     Text(f.name, color = Color.White, fontSize = 14.sp)
                     Text("${f.length() / 1_000_000} MB" + if (s.models.active == f.name) "  ·  in use" else "", color = SunYellow, fontSize = 12.sp)
+                    Spacer(Modifier.height(6.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Chip("Use", true, Modifier.width(90.dp)) { useModel(f) }
+                        Chip("Use", s.models.active == f.name, Modifier.width(90.dp)) { useModel(f) }
                         Chip("Delete", false, Modifier.width(90.dp)) {
                             if (s.engine.loadedName == f.name) s.engine.unload()
-                            s.models.delete(f); tick++
+                            s.models.delete(f)
+                            status = "Deleted ${f.name}"
+                            tick++
                         }
                     }
                 }
             }
-            Spacer(Modifier.height(12.dp))
-            Text("Download a model", color = Teal, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-            PRESETS.forEach { (label, u) -> Chip(label, url == u, Modifier.fillMaxWidth().padding(vertical = 3.dp)) { url = u } }
-            OutlinedTextField(url, { url = it }, Modifier.fillMaxWidth(), label = { Text("Model link (.task)") }, singleLine = true)
-            OutlinedTextField(token, { token = it }, Modifier.fillMaxWidth(), label = { Text("HuggingFace token (only if needed)") },
-                singleLine = true, visualTransformation = PasswordVisualTransformation())
-            Spacer(Modifier.height(8.dp))
-            progress?.let { LinearProgressIndicator(progress = { it }, modifier = Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(8.dp)), color = Teal, trackColor = Color.White.copy(alpha = 0.2f)) }
-            GradientButton(if (progress != null) "Downloading… ${((progress ?: 0f) * 100).toInt()}%" else "⬇ Download", Modifier.fillMaxWidth()) {
-                if (progress == null && url.startsWith("https://")) scope.launch {
-                    status = "Starting download…"; progress = 0f
-                    s.models.download(url.trim(), token) { p -> progress = p }
-                        .onSuccess { status = "Downloaded $it. Tap Use."; tick++ }
-                        .onFailure { status = "Download failed: ${it.message}" }
-                    progress = null
+
+            Spacer(Modifier.height(14.dp))
+            Text("Download model", color = Teal, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            PRESETS.forEach { (label, presetUrl) ->
+                GlassCard(Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { url = presetUrl }) {
+                    Text(label, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                    Text(presetUrl, color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp, maxLines = 1)
                 }
             }
             Spacer(Modifier.height(8.dp))
-            GradientButton("📁 Choose model file from phone", Modifier.fillMaxWidth(), Color(0xFF00897B), Teal) { picker.launch(arrayOf("*/*")) }
-            Spacer(Modifier.height(10.dp))
-            Text(
-                "Tips: Start with the smallest model. Gemma models need a free HuggingFace account: open the model page, accept the license, " +
-                    "create a Read token (Settings → Access Tokens) and paste it above. Or download the .task file in your browser and use " +
-                    "\"Choose model file from phone\". After the model is on the phone, chat works fully offline.",
-                color = Color.White.copy(alpha = 0.65f), fontSize = 12.sp
+            OutlinedTextField(
+                value = url,
+                onValueChange = { url = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Model URL (.task or .bin)") },
+                singleLine = true
             )
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                value = token,
+                onValueChange = { token = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Hugging Face Token (optional)") },
+                visualTransformation = PasswordVisualTransformation(),
+                singleLine = true
+            )
+            Spacer(Modifier.height(8.dp))
+            if (progress != null) {
+                LinearProgressIndicator(
+                    progress = { progress!! },
+                    modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+                    color = Teal
+                )
+                Spacer(Modifier.height(4.dp))
+                Text("Downloading: ${(progress!! * 100).toInt()}%", color = SunYellow, fontSize = 12.sp)
+                Spacer(Modifier.height(8.dp))
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                GradientButton("Download") {
+                    if (url.isBlank() || progress != null) return@GradientButton
+                    scope.launch {
+                        progress = 0f
+                        status = "Starting download…"
+                        s.models.download(url.trim(), token) { p -> progress = p }
+                            .onSuccess { name ->
+                                progress = null
+                                status = "Downloaded $name. Tap Use."
+                                tick++
+                            }
+                            .onFailure { e ->
+                                progress = null
+                                status = "Download failed: ${e.message}"
+                            }
+                    }
+                }
+                Chip("Import file", false, Modifier.width(120.dp)) {
+                    picker.launch(arrayOf("*/*"))
+                }
+            }
+            Spacer(Modifier.height(24.dp))
         }
     }
 }
